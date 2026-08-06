@@ -39,7 +39,14 @@ api/__pycache__/
 api/*.pyc
 
 # Environment variables
-# .env is now allowed to be included in the build
+# .env must stay out of the build context. Dockerfile-litellm and
+# Dockerfile-ollama-local both `COPY --exclude=./api . .`, so including it
+# baked the developer's real OPENAI_API_KEY / GOOGLE_API_KEY /
+# AWS_SECRET_ACCESS_KEY / DEEPWIKI_AUTH_CODE into an image layer — and
+# `next build` inlines any NEXT_PUBLIC_* value from it into the client bundle.
+# Supply secrets at runtime instead (start.sh already reads them from the
+# environment, and docker-compose.yml mounts .env via env_file).
+.env
 .env.local
 .env.development.local
 .env.test.local
