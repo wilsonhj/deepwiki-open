@@ -194,8 +194,11 @@ async def research_chat(
 
                         context_parts.append(f"{header}{content}")
 
-                    # Join all parts with clear separation
-                    context_text = "\n\n" + "-" * 10 + "\n\n".join(context_parts)
+                    # Join all parts with clear separation. The parenthesses
+                    # matter: without them this is
+                    # "\n\n" + "-"*10 + ("\n\n".join(...)), which glues the rule
+                    # onto the first heading and leaves the rest undelimited.
+                    context_text = ("\n\n" + "-" * 10 + "\n\n").join(context_parts)
                 else:
                     logger.warning("No documents retrieved from RAG")
             except Exception as e:

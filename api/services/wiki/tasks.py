@@ -178,6 +178,7 @@ class TaskRegistry:
                 repo=task.request.repo,
                 repo_type=task.request.type,
                 language=task.request.language,
+                comprehensive=task.request.comprehensive,
             ):
                 return WikiTaskSubmitResult(
                     task_id=key,
@@ -249,6 +250,7 @@ async def _save(
         repo=task.request.repo,
         repo_type=task.request.type,
         language=task.request.language,
+        comprehensive=task.request.comprehensive,
         wiki_cache=WikiCacheData(
             wiki_structure=task.wiki_structure,
             generated_pages=pages,
@@ -325,17 +327,30 @@ async def _determine_structure(task: WikiTask) -> WikiStructureModel:
         await asyncio.to_thread(repo.download)
 
     task.default_branch = await asyncio.to_thread(detect_default_branch, repo.save_path)
+    # Keyword arguments: read_repo_file_tree and iterate_files take their
+    # include/exclude parameters in mirrored order, and passing these
+    # positionally routed every user filter into the opposite slot. Supplying
+    # excluded_dirs then landed in included_files, flipping iterate_files into
+    # inclusion mode where a directory string matches no filename — so the
+    # structure prompt received an empty file tree.
     file_tree, readme = await asyncio.to_thread(
         read_repo_file_tree,
         repo.save_path,
-        r.excluded_dirs,
-        r.excluded_files,
-        r.included_dirs,
-        r.included_files,
+        included_files=r.included_files,
+        included_dirs=r.included_dirs,
+        excluded_files=r.excluded_files,
+        excluded_dirs=r.excluded_dirs,
     )
 
     prompt = build_structure_prompt(
-        r.owner, r.repo, file_tree, readme, r.comprehensive, r.language
+        r.owner,
+        r.repo,
+        # build_structure_prompt is typed `str` and f-strings this; passing the
+        # list gave the model a Python repr on a single line.
+        "\n".join(file_tree),
+        readme,
+        r.comprehensive,
+        r.language,
     )
     chat_request = ChatCompletionRequest(
         repo_url=r.repo_url,
