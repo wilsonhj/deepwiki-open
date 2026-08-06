@@ -21,6 +21,7 @@ from api.config import get_model_config
 from api.logger import get_logger
 from api.prompts import CODEMAP_ENRICH_PROMPT, CODEMAP_SKELETON_PROMPT
 from api.rag import RAG
+from api.repository import Repo, path_within
 from api.schemas import CodeMap, CodeMapRequest
 
 logger = get_logger(__name__)
@@ -145,30 +146,45 @@ def _format_context(documents: list) -> str:
         header = f"## File Path: {file_path}\n\n"
         context_parts.append(header + "\n\n".join(chunk_texts))
 
-    return "\n\n" + ("-" * 10) + "\n\n".join(context_parts)
+    # The parentheses go around the whole separator, not just the rule: the
+    # previous form emitted it once, glued to the first heading.
+    return ("\n\n" + ("-" * 10) + "\n\n").join(context_parts)
 
 
 def local_repo_dir(repo_url: str, repo_type: str | None) -> str:
-    """Resolve the on-disk directory of a cloned/local repository."""
-    from adalflow.utils import get_adalflow_default_root_path
+    """Resolve the on-disk directory of a cloned/local repository.
 
-    repo_url = repo_url.strip()
-    if repo_url.startswith("http://") or repo_url.startswith("https://"):
-        parts = repo_url.rstrip("/").split("/")
-        if repo_type in ("github", "gitlab", "bitbucket") and len(parts) >= 5:
-            name = f"{parts[-2]}_{parts[-1].replace('.git', '')}"
-        else:
-            name = parts[-1].replace(".git", "")
-        return os.path.join(get_adalflow_default_root_path(), "repos", name)
-    return repo_url  # already a local path
+    Delegates to `Repo` rather than re-deriving the path. The previous local
+    implementation disagreed with the clone code on both the parent directory
+    ("repos" vs "repo") and the naming rules, so every remote repository
+    resolved to a directory that does not exist.
+    """
+    return Repo(repo_url=repo_url.strip(), repo_type=repo_type).save_path
+
+
+def _resolve_within(repo_dir: str, file_path: str) -> str:
+    """Resolve `file_path` under `repo_dir`, refusing anything outside it."""
+    repo_dir = os.path.realpath(repo_dir)
+    target = os.path.realpath(os.path.join(repo_dir, file_path))
+    if not path_within(target, repo_dir):
+        raise ValueError("Resolved path escapes the repository directory")
+    return target
+
+
+def resolve_repo_file(repo_url: str, repo_type: str | None, file_path: str) -> str:
+    """Resolve `file_path` inside a repository, refusing anything outside it.
+
+    The guard has to be anchored on a directory *we* chose. Anchoring it on the
+    caller's `repo_url` was equivalent to no guard at all, because a non-URL
+    `repo_url` was returned verbatim and became the root the check compared
+    against.
+    """
+    return _resolve_within(local_repo_dir(repo_url, repo_type), file_path)
 
 
 def read_repo_file(repo_url: str, repo_type: str | None, file_path: str) -> str:
     """Read a file from the cloned/local repository, guarding against traversal."""
-    repo_dir = os.path.realpath(local_repo_dir(repo_url, repo_type))
-    target = os.path.realpath(os.path.join(repo_dir, file_path))
-    if os.path.commonpath([repo_dir, target]) != repo_dir:
-        raise ValueError("Resolved path escapes the repository directory")
+    target = resolve_repo_file(repo_url, repo_type, file_path)
     if not os.path.isfile(target):
         raise FileNotFoundError(file_path)
     with open(target, "r", encoding="utf-8", errors="replace") as f:
@@ -208,11 +224,16 @@ def _ground_citations(codemap: CodeMap, repo_dir: str) -> None:
             if not cit or not cit.snippet or not cit.file_path:
                 continue
             if cit.file_path not in file_cache:
-                path = os.path.join(repo_dir, cit.file_path)
+                # cit.file_path is model output, steerable by content in the
+                # indexed repo, and os.path.join drops repo_dir entirely for an
+                # absolute path. The reported line numbers are returned to the
+                # client, so an unguarded read here is a positional oracle over
+                # arbitrary server files.
                 try:
+                    path = _resolve_within(repo_dir, cit.file_path)
                     with open(path, "r", encoding="utf-8") as f:
                         file_cache[cit.file_path] = f.read()
-                except (OSError, UnicodeDecodeError):
+                except (OSError, UnicodeDecodeError, ValueError):
                     file_cache[cit.file_path] = None
             text = file_cache[cit.file_path]
             if not text:
@@ -282,8 +303,7 @@ async def generate_codemap(request: CodeMapRequest) -> AsyncIterator[str]:
     # ---- Phase 2: diagrams and guides ---------------------------------------------
     yield _phase("diagrams", "start")
     enrich_query = (
-        f"{request.question}\n\n<SKELETON>\n"
-        f"{skeleton.model_dump_json()}\n</SKELETON>"
+        f"{request.question}\n\n<SKELETON>\n{skeleton.model_dump_json()}\n</SKELETON>"
     )
     enrich_prompt = prompt_builder(
         system_prompt=CODEMAP_ENRICH_PROMPT.format(**prompt_fmt),

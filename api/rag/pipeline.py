@@ -13,7 +13,7 @@ from api.config import (
     iterate_files,
 )
 from api.logger import get_logger
-from api.repository import Repo
+from api.repository import REPO_DB_ROOT, Repo
 
 logger = get_logger(__name__)
 
@@ -163,8 +163,9 @@ def read_all_documents(
 def get_repo_db(repo: Repo) -> str:
     if not repo.root_path:
         raise ValueError(f"Repo root path is empty: {repo}")
-    save_db_file = os.path.join(repo.root_path, "databases", f"{repo.name}.pkl")
-    return save_db_file
+    # REPO_DB_ROOT is a sibling of the clone root, so a repository cannot be
+    # cloned on top of the directory these pickles are loaded from.
+    return os.path.join(REPO_DB_ROOT, f"{repo.dir_name}.pkl")
 
 
 def repo_index_exist(repo: Repo) -> bool:
