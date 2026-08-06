@@ -2,7 +2,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -11,6 +11,7 @@ import uvicorn
 load_dotenv()
 # ruff: noqa: E402
 
+from api.auth import require_auth
 from api.logger import get_logger, setup_logging
 from api.routers import auth, chat, codemap, repo, system, wiki
 
@@ -53,23 +54,39 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# DEEPWIKI_ALLOWED_ORIGINS is a comma-separated origin list. The previous
+# ["*"] + allow_credentials=True pairing is not inert: Starlette echoes the
+# caller's Origin back with Access-Control-Allow-Credentials: true, so any page
+# the victim visits could read responses from this API.
+_raw_origins = os.environ.get("DEEPWIKI_ALLOWED_ORIGINS", "").strip()
+allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()] or [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+allow_all_origins = allowed_origins == ["*"]
+if allow_all_origins:
+    logger.warning(
+        "DEEPWIKI_ALLOWED_ORIGINS='*' — credentials are disabled for CORS. "
+        "Set an explicit origin list to allow credentialed cross-origin requests."
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    # Never pair credentials with a wildcard.
+    allow_credentials=not allow_all_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-for module in (
-    system,
-    auth,
-    repo,
-    wiki,
-    chat,
-    codemap,
-):
+# `system` and `auth` stay public: the frontend must be able to discover whether
+# a code is required before it can supply one. Everything else is gated by
+# require_auth, which is a no-op unless WIKI_AUTH_MODE is enabled.
+for module in (system, auth):
     app.include_router(module.router)
+
+for module in (repo, wiki, chat, codemap):
+    app.include_router(module.router, dependencies=[Depends(require_auth)])
 
 
 @app.get("/")

@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
-from api.config import WIKI_AUTH_CODE, WIKI_AUTH_MODE
+from api.auth import auth_code_valid
+from api.config import WIKI_AUTH_MODE
 from api.schemas import AuthorizationConfig
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -19,4 +20,5 @@ async def validate_auth_code(request: AuthorizationConfig):
     """
     Check authorization code.
     """
-    return {"success": WIKI_AUTH_CODE == request.code}
+    # Constant-time, and an unset DEEPWIKI_AUTH_CODE no longer matches "".
+    return {"success": auth_code_valid(request.code)}
