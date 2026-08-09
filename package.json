@@ -1,0 +1,35 @@
+{
+  "name": "lexo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A fast, real-time multilingual word game in Spanish, French, Portuguese and Japanese.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wilsonhj/lexo.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/server",
+    "packages/client"
+  ],
+  "scripts": {
+    "build": "npm run build -w @lexo/core && npm run build -w @lexo/server && npm run build -w @lexo/client",
+    "build:core": "npm run build -w @lexo/core",
+    "dev": "npm run build:core && node scripts/dev.mjs",
+    "start": "node packages/server/dist/index.js",
+    "test": "npm run build:core && vitest run",
+    "test:watch": "vitest",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "typecheck": "npm run build:core && tsc -p packages/server --noEmit && tsc -p packages/client --noEmit",
+    "bank:check": "npm run build:core && node scripts/check-banks.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

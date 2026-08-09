@@ -1,0 +1,67 @@
+name: Word suggestion
+description: Propose words for a category the game does not cover well
+title: '[words] '
+labels: ['word bank', 'good first issue']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Words are the most useful contribution to this project.
+
+        If you are comfortable opening a pull request, editing
+        `packages/core/src/banks/<lang>.ts` directly is even more welcome —
+        see [docs/WORD_BANKS.md](../../docs/WORD_BANKS.md). Otherwise, list
+        them here and someone will add them.
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - Español (es)
+        - Français (fr)
+        - Português (pt)
+        - 日本語 (ja)
+        - Another language (say which below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - animal
+        - country
+        - city
+        - food
+        - object
+        - profession
+        - plant
+        - name (first names)
+    validations:
+      required: true
+
+  - type: textarea
+    id: words
+    attributes:
+      label: Words
+      description: |
+        One per line, spelled as a player would write them, without a leading
+        article. For Japanese, include the reading: `犬|いぬ`
+      placeholder: |
+        equidna
+        okapi
+        quirquincho
+    validations:
+      required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: Where these came from
+      description: |
+        Your own knowledge is a perfectly good answer. Please do not copy from
+        a commercial game or a paywalled dictionary — see the licensing note in
+        docs/WORD_BANKS.md.
+      placeholder: Native speaker / played a game where these came up
