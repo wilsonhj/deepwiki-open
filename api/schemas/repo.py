@@ -17,7 +17,12 @@ class WikiTaskRequest(RepoRequestBase):
 
     @property
     def repo_key(self) -> str:
-        return f"{self.type}_{self.owner}_{self.repo}"
+        # language and comprehensive are part of the identity: the wiki cache is
+        # written per (type, owner, repo, language, comprehensive), so a key that
+        # omits them made a `ja` request join a running `en` task and then read a
+        # cache that was never written.
+        variant = "comprehensive" if self.comprehensive else "concise"
+        return f"{self.type}_{self.owner}_{self.repo}_{self.language}_{variant}"
 
 
 class TaskStatus(str, Enum):

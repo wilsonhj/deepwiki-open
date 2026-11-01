@@ -6,8 +6,9 @@ from typing import Optional, Literal
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from api.config import WIKI_AUTH_CODE, WIKI_AUTH_MODE, configs
+from api.config import configs
 from api.logger import get_logger
+from api.repository import local_repo_roots, path_within
 from api.schemas import (
     ProcessedProjectEntry,
     WikiCacheData,
@@ -91,13 +92,30 @@ async def get_local_repo_structure(
             },
         )
 
+    # Without this the endpoint walks any directory on the host and returns its
+    # file tree plus any README it finds, unauthenticated.
+    roots = local_repo_roots()
+    resolved = os.path.realpath(path)
+    if not any(path_within(resolved, root) for root in roots):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": (
+                    "Path is not within an allowed local repository root. Set "
+                    "DEEPWIKI_LOCAL_REPO_ROOTS to the directories that may be read."
+                )
+            },
+        )
+    path = resolved
+
     if not os.path.isdir(path):
         return JSONResponse(
             status_code=404, content={"error": f"Directory not found: {path}"}
         )
 
-    try:
-        logger.info(f"Processing local repository at: {path}")
+    def _walk() -> tuple[str, str]:
+        # os.walk and the README read are blocking; running them inline in an
+        # async handler stalls the event loop for the whole request.
         file_tree_lines = []
         readme_content = ""
 
@@ -114,19 +132,29 @@ async def get_local_repo_structure(
             for file in files:
                 if file.startswith(".") or file == "__init__.py" or file == ".DS_Store":
                     continue
+                file_path = os.path.join(root, file)
+                # os.walk lists symlinks as files; reading one (e.g. a README
+                # linked to a host file) would leak content outside the root.
+                if os.path.islink(file_path) or not path_within(file_path, path):
+                    continue
                 rel_dir = os.path.relpath(root, path)
                 rel_file = os.path.join(rel_dir, file) if rel_dir != "." else file
                 file_tree_lines.append(rel_file)
                 # Find README.md (case-insensitive)
                 if file.lower() == "readme.md" and not readme_content:
                     try:
-                        with open(os.path.join(root, file), "r", encoding="utf-8") as f:
+                        with open(file_path, "r", encoding="utf-8") as f:
                             readme_content = f.read()
                     except Exception as e:
                         logger.warning(f"Could not read README.md: {str(e)}")
                         readme_content = ""
 
         file_tree_str = "\n".join(sorted(file_tree_lines))
+        return file_tree_str, readme_content
+
+    try:
+        logger.info(f"Processing local repository at: {path}")
+        file_tree_str, readme_content = await asyncio.to_thread(_walk)
         return {"file_tree": file_tree_str, "readme": readme_content}
     except Exception as e:
         logger.error(f"Error processing local repository: {str(e)}")
@@ -142,6 +170,7 @@ async def read_wiki(
     repo: str = Query(..., description="Repository name"),
     repo_type: str = Query(..., description="Repository type (e.g., github, gitlab)"),
     language: str = Query(..., description="Language of the wiki content"),
+    comprehensive: bool = Query(True, description="Comprehensive vs concise wiki"),
 ):
     """Retrieve cached wiki data (structure and generated pages) for a repository."""
     supported_langs = configs["lang_config"]["supported_languages"]
@@ -151,7 +180,7 @@ async def read_wiki(
     logger.info(
         f"Attempting to retrieve wiki cache for {owner}/{repo} ({repo_type}), lang: {language}"
     )
-    cached_data = await read_wiki_cache(owner, repo, repo_type, language)
+    cached_data = await read_wiki_cache(owner, repo, repo_type, language, comprehensive)
     if cached_data:
         return cached_data
     # Return 200 with null body if not found (frontend expects this behavior)
@@ -167,6 +196,7 @@ async def delete_wiki(
     repo: str = Query(..., description="Repository name"),
     repo_type: str = Query(..., description="Repository type (e.g., github, gitlab)"),
     language: str = Query(..., description="Language of the wiki content"),
+    comprehensive: bool = Query(True, description="Comprehensive vs concise wiki"),
     authorization_code: Optional[str] = Query(None, description="Authorization code"),
 ):
     """
@@ -177,17 +207,16 @@ async def delete_wiki(
     if language not in supported_langs:
         raise HTTPException(status_code=400, detail="Language is not supported")
 
-    if WIKI_AUTH_MODE:
-        logger.info("check the authorization code")
-        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
-            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+    # Authorization is enforced by the router-level require_auth dependency.
 
     logger.info(
         f"Attempting to delete wiki cache for {owner}/{repo} ({repo_type}), lang: {language}"
     )
 
     try:
-        deleted = await delete_wiki_cache(owner, repo, repo_type, language)
+        deleted = await delete_wiki_cache(
+            owner, repo, repo_type, language, comprehensive
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to delete wiki cache: {str(e)}"

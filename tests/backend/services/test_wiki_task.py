@@ -1,9 +1,11 @@
 import asyncio
+import inspect
 
 import pytest
 
 import api.services.wiki.tasks as wt
 from api.schemas import WikiPage, WikiStructureModel, WikiTaskRequest
+from api.services.wiki.structure import read_repo_file_tree
 from api.services.wiki.tasks import (
     TaskRegistry,
     TaskStatus,
@@ -96,17 +98,53 @@ async def test_submit_joins_active_task(monkeypatch):
         await gate.wait()
         task.status = TaskStatus.COMPLETED
 
-
     r1 = await reg.submit(_req(), blocking_run)
     assert r1.created
     await _wait_active(reg, r1.task_id)
 
-    r2 = await reg.submit(_req(language="ja"), blocking_run)  # different settings, same repo
+    # Identical request -> joins the in-flight task.
+    r2 = await reg.submit(_req(), blocking_run)
     assert r2.joined and not r2.created
     assert r2.task_id == r1.task_id
 
     gate.set()
     await reg.get(r1.task_id).task
+
+
+async def test_submit_does_not_join_across_languages(monkeypatch):
+    """A different language must get its own task.
+
+    The wiki cache is written per (type, owner, repo, language, comprehensive).
+    Joining an `en` task from a `ja` request reported COMPLETED to the `ja`
+    caller and then handed it a cache entry that was never written.
+    """
+    reg = TaskRegistry(max_concurrent=2)
+    monkeypatch.setattr(wt, "WIKI_TASK_TTL_SECONDS", 0)
+    monkeypatch.setattr(wt, "wiki_cache_exists", lambda **p: False)
+
+    gate = asyncio.Event()
+
+    async def blocking_run(task: WikiTask) -> None:
+        task.status = TaskStatus.GENERATING
+        await gate.wait()
+        task.status = TaskStatus.COMPLETED
+
+    r_en = await reg.submit(_req(language="en"), blocking_run)
+    assert r_en.created
+    await _wait_active(reg, r_en.task_id)
+
+    r_ja = await reg.submit(_req(language="ja"), blocking_run)
+    assert r_ja.created and not r_ja.joined
+    assert r_ja.task_id != r_en.task_id
+
+    # Same language but the other wiki depth is also a distinct task.
+    r_concise = await reg.submit(_req(language="en", comprehensive=False), blocking_run)
+    assert r_concise.created and not r_concise.joined
+    assert r_concise.task_id != r_en.task_id
+
+    gate.set()
+    for r in (r_en, r_ja, r_concise):
+        await reg.get(r.task_id).task
 
 
 async def test_submit_serves_cache(monkeypatch):
@@ -221,9 +259,19 @@ async def test_run_task_end_to_end(monkeypatch):
     monkeypatch.setattr(wt, "repo_index_exist", lambda repo: True)
     monkeypatch.setattr(wt, "Repo", _FakeRepo)
     monkeypatch.setattr(wt, "detect_default_branch", lambda p: "main")
-    monkeypatch.setattr(
-        wt, "read_repo_file_tree", lambda p, *a, **k: ("README.md\nsrc/a.py", "readme")
-    )
+    # read_repo_file_tree returns list[str]; the previous string return value
+    # hid the type mismatch at the build_structure_prompt call site.
+    tree_calls: list[dict] = []
+
+    def fake_tree(*args, **kwargs):
+        # Bind against the real signature so a positional call in the wrong
+        # order (the old bug routed excluded_dirs into included_files) is
+        # caught rather than silently accepted by a catch-all mock.
+        bound = inspect.signature(read_repo_file_tree).bind(*args, **kwargs)
+        tree_calls.append(dict(bound.arguments))
+        return ["README.md", "src/a.py"], "readme"
+
+    monkeypatch.setattr(wt, "read_repo_file_tree", fake_tree)
 
     async def fake_research(request):
         # structure prompt contains "<file_tree>"; page prompt does not.
@@ -244,10 +292,22 @@ async def test_run_task_end_to_end(monkeypatch):
 
     monkeypatch.setattr(wt, "_save", fake_save)
 
-    task = _req(comprehensive=False)
+    task = _req(
+        comprehensive=False,
+        excluded_dirs=["ex_dir"],
+        excluded_files=["ex_file"],
+        included_dirs=["in_dir"],
+        included_files=["in_file"],
+    )
     await generate_repo_wiki(task)
 
     assert task.status == TaskStatus.COMPLETED
+    assert len(tree_calls) == 1
+    call = tree_calls[0]
+    assert call["excluded_dirs"] == ["ex_dir"]
+    assert call["excluded_files"] == ["ex_file"]
+    assert call["included_dirs"] == ["in_dir"]
+    assert call["included_files"] == ["in_file"]
     assert task.default_branch == "main"
     assert task.pages_total == 1 and task.pages_done == 1
     content = saved["pages"]["page-1"].content

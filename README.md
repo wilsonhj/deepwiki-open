@@ -27,6 +27,32 @@ https://github.com/user-attachments/assets/48d1e60a-eb91-4c05-a5a8-3624ffb79fb1
 
 
 
+## ⚙️ Configuration
+
+Besides the provider API keys (see [`api/README.md`](api/README.md)), the API
+server reads these environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEEPWIKI_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated list of origins allowed by CORS. Set it to the URL your frontend is served from. `*` allows any origin but disables credentialed CORS requests. |
+| `DEEPWIKI_LOCAL_REPO_ROOTS` | *(empty)* | Directories (separated by `:` on Linux/macOS, `;` on Windows) under which local repositories may be read. Empty means local repositories are refused: it must be set to use `type=local` repositories and the `/local_repo/structure` endpoint. |
+| `DEEPWIKI_AUTH_MODE` | `false` | Set to `true` or `1` to require an authorization code. |
+| `DEEPWIKI_AUTH_CODE` | *(empty)* | The authorization code. If auth mode is on and this is empty, every request is refused. |
+
+**Auth mode:** when `DEEPWIKI_AUTH_MODE` is enabled, every API route except
+`/health`, the config endpoints, and `/auth/*` returns `401` unless the request
+carries the code as an `authorization_code` query parameter. API clients must
+send it on every request. The bundled frontend currently sends it only when
+deleting a wiki cache, so other frontend features fail with `401` while auth
+mode is on.
+
+**Upgrading:** clone, index, and wiki-cache paths changed. Clones now live in
+`~/.adalflow/repo/{owner}_{repo}-{digest}`, indexes in
+`~/.adalflow/databases/{owner}_{repo}-{digest}.pkl`, and wiki caches carry a
+`_comprehensive` or `_concise` suffix. Existing repositories are cloned and
+indexed again the first time they are used. Old comprehensive wiki caches are
+still read.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Feel free to:

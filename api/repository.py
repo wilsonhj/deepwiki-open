@@ -1,6 +1,8 @@
 import base64
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -14,6 +16,34 @@ logger = get_logger(__name__)
 
 
 CLONE_REPO_ROOT = os.path.join(deepwiki_root(), "repo")
+
+# Vector-store pickles live beside the clone root, not inside it. Nesting them
+# under CLONE_REPO_ROOT let a repository literally named "databases" be cloned
+# straight over the directory holding every pickle we later feed to pickle.load.
+REPO_DB_ROOT = os.path.join(deepwiki_root(), "databases")
+
+
+def local_repo_roots() -> list[str]:
+    """Operator-approved roots under which `type=local` repositories may live.
+
+    Empty by default: a network-facing service must not treat a client-supplied
+    filesystem path as a repository. Set DEEPWIKI_LOCAL_REPO_ROOTS (os.pathsep
+    separated) to opt back in.
+    """
+    raw = os.environ.get("DEEPWIKI_LOCAL_REPO_ROOTS", "")
+    return [os.path.realpath(p) for p in raw.split(os.pathsep) if p.strip()]
+
+
+def path_within(path: str, root: str) -> bool:
+    """True when `path` resolves to `root` or something beneath it."""
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _url_digest(repo_url: str) -> str:
+    """Stable short digest of the *whole* URL, host included."""
+    normalized = repo_url.strip().rstrip("/").removesuffix(".git").lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 def _get_github_file_content(
@@ -313,7 +343,11 @@ def get_repo_content(
 
 
 def download_repo(
-    repo_url: str, local_path: str, repo_type: str = None, access_token: str = None
+    repo_url: str,
+    local_path: str,
+    repo_type: str = None,
+    access_token: str = None,
+    force: bool = False,
 ) -> str:
     """
     Downloads a Git repository (GitHub, GitLab, or Bitbucket) to a specified local path.
@@ -338,11 +372,17 @@ def download_repo(
 
         # Check if repository already exists
         if os.path.exists(local_path) and os.listdir(local_path):
-            # Directory exists and is not empty
-            logger.warning(
-                f"Repository already exists at {local_path}. Using existing repository."
-            )
-            return f"Using existing repository at {local_path}"
+            if force:
+                # Without this, force=True silently returned the stale clone and
+                # there was no way to refresh a repository.
+                logger.info(f"force=True, removing existing clone at {local_path}")
+                shutil.rmtree(local_path)
+            else:
+                # Directory exists and is not empty
+                logger.warning(
+                    f"Repository already exists at {local_path}. Using existing repository."
+                )
+                return f"Using existing repository at {local_path}"
 
         # Ensure the local path exists
         os.makedirs(local_path, exist_ok=True)
@@ -489,27 +529,53 @@ class Repo:
                 # GitLab URL format: https://gitlab.com/owner/repo or https://gitlab.com/group/subgroup/repo
                 # Bitbucket URL format: https://bitbucket.org/owner/repo
                 owner = url_parts[-2]
-                repo = url_parts[-1].replace(".git", "")
+                # removesuffix, not replace: "acme.github.io" must not become "acmehub.io"
+                repo = url_parts[-1].removesuffix(".git")
                 repo_name = f"{owner}_{repo}"
             else:
-                repo_name = url_parts[-1].replace(".git", "")
+                repo_name = url_parts[-1].removesuffix(".git")
         else:
             # This is a local repository
             repo_name = os.path.basename(repo_url)
         return repo_name
 
+    @property
+    def dir_name(self) -> str:
+        """On-disk directory name for a cloned repository.
+
+        `name` alone is ambiguous — it is built from the last two URL segments
+        with the host discarded, so https://evil.com/facebook/react and
+        https://github.com/facebook/react both yield "facebook_react" and the
+        first one indexed wins for everyone. The digest binds the directory to
+        the full URL.
+        """
+        return f"{self.name}-{_url_digest(self.repo_url)}"
+
     def download(self, force: bool = False) -> None:
-        if force or (not self.downloaded and not self.is_local):
+        # A local repository is never cloned, whatever `force` says.
+        if not self.is_local and (force or not self.downloaded):
             os.makedirs(self.save_path, exist_ok=True)
             download_repo(
-                self.repo_url, self.save_path, self.repo_type, self.access_token
+                self.repo_url,
+                self.save_path,
+                self.repo_type,
+                self.access_token,
+                force=force,
             )
 
     @property
     def save_path(self) -> str:
         if self.is_local:
-            return self.repo_url
-        return os.path.join(self.root_path, self.name)
+            resolved = os.path.realpath(self.repo_url)
+            roots = local_repo_roots()
+            if not any(path_within(resolved, root) for root in roots):
+                raise ValueError(
+                    "Local repository paths are not allowed. Set "
+                    "DEEPWIKI_LOCAL_REPO_ROOTS to the directories that may be "
+                    "indexed."
+                )
+            return resolved
+        return os.path.join(self.root_path, self.dir_name)
 
     @property
     def downloaded(self) -> bool:

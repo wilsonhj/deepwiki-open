@@ -23,25 +23,81 @@ os.makedirs(WIKI_CACHE_DIR, exist_ok=True)
 WIKI_PREFIX = "deepwiki_cache_"
 
 
-def get_wiki_cache_path(owner: str, repo: str, repo_type: str, language: str) -> str:
-    """Generates the file path for a given wiki cache."""
+COMPREHENSIVE_VARIANT = "comprehensive"
+CONCISE_VARIANT = "concise"
+_VARIANTS = (COMPREHENSIVE_VARIANT, CONCISE_VARIANT)
+
+
+def _variant(comprehensive: bool) -> str:
+    return COMPREHENSIVE_VARIANT if comprehensive else CONCISE_VARIANT
+
+
+def get_wiki_cache_path(
+    owner: str, repo: str, repo_type: str, language: str, comprehensive: bool = True
+) -> str:
+    """Generates the file path for a given wiki cache.
+
+    `comprehensive` is part of the key: the frontend already sends it and builds
+    its own key from it, but the server ignored it, so the comprehensive and
+    concise wikis for a repo overwrote each other.
+    """
+    filename = (
+        f"{WIKI_PREFIX}{repo_type}_{owner}_{repo}_{language}_"
+        f"{_variant(comprehensive)}.json"
+    )
+    return os.path.join(WIKI_CACHE_DIR, filename)
+
+
+def _legacy_wiki_cache_path(
+    owner: str, repo: str, repo_type: str, language: str
+) -> str:
+    """Name used before the variant suffix existed.
+
+    Those caches were always written by the comprehensive default, so they are
+    only ever a fallback for the comprehensive variant.
+    """
     filename = f"{WIKI_PREFIX}{repo_type}_{owner}_{repo}_{language}.json"
     return os.path.join(WIKI_CACHE_DIR, filename)
 
 
-def wiki_cache_exists(owner: str, repo: str, repo_type: str, language: str) -> bool:
-    return os.path.exists(
-        get_wiki_cache_path(owner, repo=repo, repo_type=repo_type, language=language)
+def _existing_wiki_cache_path(
+    owner: str, repo: str, repo_type: str, language: str, comprehensive: bool = True
+) -> str | None:
+    """Path of the cache file to read, preferring the current name."""
+    path = get_wiki_cache_path(owner, repo, repo_type, language, comprehensive)
+    if os.path.exists(path):
+        return path
+    if comprehensive:
+        legacy = _legacy_wiki_cache_path(owner, repo, repo_type, language)
+        if os.path.exists(legacy):
+            return legacy
+    return None
+
+
+def wiki_cache_exists(
+    owner: str, repo: str, repo_type: str, language: str, comprehensive: bool = True
+) -> bool:
+    return (
+        _existing_wiki_cache_path(
+            owner,
+            repo=repo,
+            repo_type=repo_type,
+            language=language,
+            comprehensive=comprehensive,
+        )
+        is not None
     )
 
 
 async def read_wiki_cache(
-    owner: str, repo: str, repo_type: str, language: str
+    owner: str, repo: str, repo_type: str, language: str, comprehensive: bool = True
 ) -> WikiCacheData | None:
     """Reads wiki cache data from the file system."""
-    if not wiki_cache_exists(owner, repo, repo_type, language):
+    cache_path = _existing_wiki_cache_path(
+        owner, repo, repo_type, language, comprehensive
+    )
+    if cache_path is None:
         return None
-    cache_path = get_wiki_cache_path(owner, repo, repo_type, language)
     try:
         return await aload(WikiCacheData, cache_path, encoding="utf-8")
     except Exception:
@@ -50,7 +106,12 @@ async def read_wiki_cache(
 
 
 async def save_wiki_cache(
-    owner: str, repo: str, repo_type: str, language: str, wiki_cache: WikiCacheData
+    owner: str,
+    repo: str,
+    repo_type: str,
+    language: str,
+    wiki_cache: WikiCacheData,
+    comprehensive: bool = True,
 ) -> bool:
     """Saves wiki cache data to the file system."""
     cache_path = get_wiki_cache_path(
@@ -58,6 +119,7 @@ async def save_wiki_cache(
         repo=repo,
         repo_type=repo_type,
         language=language,
+        comprehensive=comprehensive,
     )
     logger.info(f"Attempting to save wiki cache. Path: {cache_path}")
     try:
@@ -72,21 +134,32 @@ async def save_wiki_cache(
         return False
 
 
-async def delete_wiki_cache(owner: str, repo: str, repo_type: str, language: str):
+async def delete_wiki_cache(
+    owner: str, repo: str, repo_type: str, language: str, comprehensive: bool = True
+):
     cache_path = get_wiki_cache_path(
         owner,
         repo,
         repo_type,
         language,
+        comprehensive,
     )
+    candidates = [cache_path]
+    if comprehensive:
+        # Remove a legacy-named cache too, or it would be served again as the
+        # comprehensive wiki right after this delete.
+        candidates.append(_legacy_wiki_cache_path(owner, repo, repo_type, language))
 
-    if not os.path.exists(cache_path):
+    deleted = False
+    for path in candidates:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info("Successfully deleted wiki cache: %s", path)
+            deleted = True
+
+    if not deleted:
         logger.warning("Wiki cache not found, cannot delete: %s", cache_path)
-        return False
-
-    os.remove(cache_path)
-    logger.info("Successfully deleted wiki cache: %s", cache_path)
-    return True
+    return deleted
 
 
 async def list_wiki_cache() -> list[WikiTaskSummary]:
@@ -98,15 +171,32 @@ async def list_wiki_cache() -> list[WikiTaskSummary]:
 
     logger.info(f"Scanning for project cache files in: {WIKI_CACHE_DIR}")
     entries = []
-    for filename in await asyncio.to_thread(os.listdir, WIKI_CACHE_DIR):
+    filenames = await asyncio.to_thread(os.listdir, WIKI_CACHE_DIR)
+    present = set(filenames)
+    for filename in filenames:
         if not (filename.startswith(WIKI_PREFIX) and filename.endswith(".json")):
+            continue
+        stem = os.path.splitext(filename)[0]
+        # A legacy-named cache is shadowed by its comprehensive successor (reads
+        # prefer the new name), so listing both would show a duplicate project.
+        if (
+            not stem.endswith(tuple(f"_{v}" for v in _VARIANTS))
+            and f"{stem}_{COMPREHENSIVE_VARIANT}.json" in present
+        ):
             continue
         file_path = os.path.join(WIKI_CACHE_DIR, filename)
         try:
             stats = await asyncio.to_thread(os.stat, file_path)
-            repo_type, owner, *repo, language = (
-                os.path.splitext(filename)[0].removeprefix(WIKI_PREFIX).split("_")
-            )
+            parts = os.path.splitext(filename)[0].removeprefix(WIKI_PREFIX).split("_")
+            # Caches written before the variant suffix existed have no trailing
+            # comprehensive/concise token; unpacking them with the new arity
+            # would silently shift language into repo.
+            if len(parts) >= 5 and parts[-1] in _VARIANTS:
+                parts = parts[:-1]
+            if len(parts) < 4:
+                logger.warning("Skipping unparseable wiki cache name: %s", filename)
+                continue
+            repo_type, owner, *repo, language = parts
             entries.append(
                 WikiTaskSummary(
                     id=filename,

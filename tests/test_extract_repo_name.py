@@ -67,19 +67,43 @@ class TestExtractRepoNameFromUrl:
 
 
 @pytest.mark.parametrize(
-    "url, repo_type, target_path",
+    "url, repo_type, prefix",
     [
-        (
-            "https://github.com/owner/repo",
-            "github",
-            os.path.join(CLONE_REPO_ROOT, "owner_repo"),
-        ),
+        ("https://github.com/owner/repo", "github", "owner_repo-"),
         (
             "https://github.com/AsyncFuncAI/deepwiki-open",
             "github",
-            os.path.join(CLONE_REPO_ROOT, "AsyncFuncAI_deepwiki-open"),
+            "AsyncFuncAI_deepwiki-open-",
         ),
     ],
 )
-def test_save_dir(url, repo_type, target_path):
-    assert Repo(repo_url=url, repo_type=repo_type).save_path == target_path
+def test_save_dir(url, repo_type, prefix):
+    """Clones live under CLONE_REPO_ROOT, in a directory tagged with a URL digest."""
+    save_path = Repo(repo_url=url, repo_type=repo_type).save_path
+    assert os.path.dirname(save_path) == CLONE_REPO_ROOT
+    assert os.path.basename(save_path).startswith(prefix)
+
+
+def test_save_dir_is_host_specific():
+    """Two repos differing only by host must not share a clone directory.
+
+    The name is built from the last two URL path segments with the host
+    discarded, so https://evil.com/facebook/react and
+    https://github.com/facebook/react both produce the name "facebook_react".
+    Whoever indexed first would otherwise own that directory for everyone.
+    """
+    genuine = Repo("https://github.com/facebook/react", "github").save_path
+    impostor = Repo("https://evil.com/facebook/react", "github").save_path
+    assert genuine != impostor
+
+
+def test_repo_name_does_not_mangle_dot_git_substring():
+    """`.git` is a suffix to strip, not a substring to delete."""
+    assert Repo("https://github.com/acme/acme.github.io", "github").name == (
+        "acme_acme.github.io"
+    )
+    # ...and so must not collide with a genuinely different repository.
+    assert (
+        Repo("https://github.com/acme/acme.github.io", "github").save_path
+        != Repo("https://github.com/acme/acmehub.io", "github").save_path
+    )

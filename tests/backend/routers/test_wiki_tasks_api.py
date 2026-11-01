@@ -71,7 +71,9 @@ def test_submit_then_progress_to_completed(monkeypatch):
         data = r.json()
         assert data["created"] is True and data["status"] == "pending"
         task_id = data["task_id"]
-        assert task_id == "github_o_r"
+        # The key carries language and wiki depth, because the cache is written
+        # per (type, owner, repo, language, comprehensive).
+        assert task_id == "github_o_r_en_comprehensive"
 
         for _ in range(50):
             g = client.get(f"/wiki/tasks/{task_id}")
@@ -102,12 +104,24 @@ def test_submit_twice_joins(monkeypatch):
     from api.main import app
 
     with TestClient(app) as client:
-        body = {"owner": "o", "repo": "r", "type": "github", "repo_url": "https://github.com/o/r"}
+        body = {
+            "owner": "o",
+            "repo": "r",
+            "type": "github",
+            "repo_url": "https://github.com/o/r",
+        }
         r1 = client.post("/wiki/tasks", json=body).json()
-        # second submit (different language) must JOIN the active task
-        r2 = client.post("/wiki/tasks", json={**body, "language": "ja"}).json()
+        # An identical submit joins the active task.
+        r2 = client.post("/wiki/tasks", json=body).json()
         assert r2["joined"] is True and r2["created"] is False
         assert r2["task_id"] == r1["task_id"]
+
+        # A different language is a different wiki and must NOT join: the `ja`
+        # caller would otherwise be told COMPLETED and handed an `en` cache
+        # entry that was never written for it.
+        r3 = client.post("/wiki/tasks", json={**body, "language": "ja"}).json()
+        assert r3["created"] is True and r3["joined"] is False
+        assert r3["task_id"] != r1["task_id"]
         started["go"] = True
 
 
@@ -136,7 +150,12 @@ def test_list_summary_omits_wiki_structure(monkeypatch):
     from api.main import app
 
     with TestClient(app) as client:
-        body = {"owner": "o", "repo": "r", "type": "github", "repo_url": "https://github.com/o/r"}
+        body = {
+            "owner": "o",
+            "repo": "r",
+            "type": "github",
+            "repo_url": "https://github.com/o/r",
+        }
         tid = client.post("/wiki/tasks", json=body).json()["task_id"]
 
         entry = None
@@ -150,7 +169,9 @@ def test_list_summary_omits_wiki_structure(monkeypatch):
 
         # list uses WikiTaskSummary -> no wiki_structure field at all
         assert "wiki_structure" not in entry
-        assert {"id", "status", "pages_done", "pages_total", "submitted_at"} <= set(entry)
+        assert {"id", "status", "pages_done", "pages_total", "submitted_at"} <= set(
+            entry
+        )
 
         # single endpoint uses WikiTaskStatus -> wiki_structure field present
         single = client.get(f"/wiki/tasks/{tid}").json()
@@ -165,7 +186,7 @@ def test_list_summary_omits_wiki_structure(monkeypatch):
 def _sse_first_data(text: str) -> dict:
     """Return the first `data:` frame in an SSE body, parsed as JSON."""
     line = next(l for l in text.splitlines() if l.startswith("data:"))
-    return json.loads(line[len("data:"):].strip())
+    return json.loads(line[len("data:") :].strip())
 
 
 def test_stream_unknown_task_returns_404():
@@ -180,7 +201,12 @@ def test_stream_completed_emits_done_event(monkeypatch):
     from api.main import app
 
     with TestClient(app) as client:
-        body = {"owner": "o", "repo": "r", "type": "github", "repo_url": "https://github.com/o/r"}
+        body = {
+            "owner": "o",
+            "repo": "r",
+            "type": "github",
+            "repo_url": "https://github.com/o/r",
+        }
         tid = client.post("/wiki/tasks", json=body).json()["task_id"]
 
         # Let the task finish first; a terminal task makes the stream emit a
@@ -213,7 +239,12 @@ def test_stream_failed_emits_error_event(monkeypatch):
     from api.main import app
 
     with TestClient(app) as client:
-        body = {"owner": "o", "repo": "r", "type": "github", "repo_url": "https://github.com/o/r"}
+        body = {
+            "owner": "o",
+            "repo": "r",
+            "type": "github",
+            "repo_url": "https://github.com/o/r",
+        }
         tid = client.post("/wiki/tasks", json=body).json()["task_id"]
 
         for _ in range(50):
