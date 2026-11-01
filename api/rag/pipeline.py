@@ -344,9 +344,10 @@ class DatabaseManager:
     ) -> None:
         """
         Download and prepare all paths.
-        Paths:
-        ~/.adalflow/repos/{owner}_{repo_name} (for url, local path will be the same)
-        ~/.adalflow/databases/{owner}_{repo_name}.pkl
+        Paths (see api.repository.CLONE_REPO_ROOT / REPO_DB_ROOT):
+        ~/.adalflow/repo/{owner}_{repo_name}-{url_digest}   (clone; a local
+            repo is used in place and must be under DEEPWIKI_LOCAL_REPO_ROOTS)
+        ~/.adalflow/databases/{owner}_{repo_name}-{url_digest}.pkl
 
         Args:
             repo_type(str): Type of repository

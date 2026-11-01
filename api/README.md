@@ -192,7 +192,7 @@ for chunk in response.iter_content(chunk_size=None):
 ## 💾 Storage
 
 All data is stored locally on your machine:
-- Cloned repositories: `~/.adalflow/repos/`
+- Cloned repositories: `~/.adalflow/repo/`
 - Embeddings and indexes: `~/.adalflow/databases/`
 - Generated wiki cache: `~/.adalflow/wikicache/`
 

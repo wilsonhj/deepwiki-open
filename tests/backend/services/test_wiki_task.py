@@ -1,9 +1,11 @@
 import asyncio
+import inspect
 
 import pytest
 
 import api.services.wiki.tasks as wt
 from api.schemas import WikiPage, WikiStructureModel, WikiTaskRequest
+from api.services.wiki.structure import read_repo_file_tree
 from api.services.wiki.tasks import (
     TaskRegistry,
     TaskStatus,
@@ -259,11 +261,17 @@ async def test_run_task_end_to_end(monkeypatch):
     monkeypatch.setattr(wt, "detect_default_branch", lambda p: "main")
     # read_repo_file_tree returns list[str]; the previous string return value
     # hid the type mismatch at the build_structure_prompt call site.
-    monkeypatch.setattr(
-        wt,
-        "read_repo_file_tree",
-        lambda p, *a, **k: (["README.md", "src/a.py"], "readme"),
-    )
+    tree_calls: list[dict] = []
+
+    def fake_tree(*args, **kwargs):
+        # Bind against the real signature so a positional call in the wrong
+        # order (the old bug routed excluded_dirs into included_files) is
+        # caught rather than silently accepted by a catch-all mock.
+        bound = inspect.signature(read_repo_file_tree).bind(*args, **kwargs)
+        tree_calls.append(dict(bound.arguments))
+        return ["README.md", "src/a.py"], "readme"
+
+    monkeypatch.setattr(wt, "read_repo_file_tree", fake_tree)
 
     async def fake_research(request):
         # structure prompt contains "<file_tree>"; page prompt does not.
@@ -284,10 +292,22 @@ async def test_run_task_end_to_end(monkeypatch):
 
     monkeypatch.setattr(wt, "_save", fake_save)
 
-    task = _req(comprehensive=False)
+    task = _req(
+        comprehensive=False,
+        excluded_dirs=["ex_dir"],
+        excluded_files=["ex_file"],
+        included_dirs=["in_dir"],
+        included_files=["in_file"],
+    )
     await generate_repo_wiki(task)
 
     assert task.status == TaskStatus.COMPLETED
+    assert len(tree_calls) == 1
+    call = tree_calls[0]
+    assert call["excluded_dirs"] == ["ex_dir"]
+    assert call["excluded_files"] == ["ex_file"]
+    assert call["included_dirs"] == ["in_dir"]
+    assert call["included_files"] == ["in_file"]
     assert task.default_branch == "main"
     assert task.pages_total == 1 and task.pages_done == 1
     content = saved["pages"]["page-1"].content
