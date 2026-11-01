@@ -39,7 +39,9 @@ def auth_code_valid(code: Optional[str]) -> bool:
         return False
     if not code:
         return False
-    return hmac.compare_digest(WIKI_AUTH_CODE, code)
+    # compare_digest raises TypeError for str arguments containing non-ASCII
+    # characters, which turned a code such as "é" into a 500. Bytes are fine.
+    return hmac.compare_digest(WIKI_AUTH_CODE.encode("utf-8"), code.encode("utf-8"))
 
 
 async def require_auth(
@@ -52,10 +54,3 @@ async def require_auth(
         return
     if not auth_code_valid(authorization_code):
         raise HTTPException(status_code=401, detail="Authorization code is invalid")
-
-
-def websocket_auth_valid(payload: dict) -> bool:
-    """Authorization check for WebSocket handshakes, which carry no query dep."""
-    if not WIKI_AUTH_MODE:
-        return True
-    return auth_code_valid(payload.get("authorization_code"))
