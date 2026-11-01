@@ -132,13 +132,18 @@ async def get_local_repo_structure(
             for file in files:
                 if file.startswith(".") or file == "__init__.py" or file == ".DS_Store":
                     continue
+                file_path = os.path.join(root, file)
+                # os.walk lists symlinks as files; reading one (e.g. a README
+                # linked to a host file) would leak content outside the root.
+                if os.path.islink(file_path) or not path_within(file_path, path):
+                    continue
                 rel_dir = os.path.relpath(root, path)
                 rel_file = os.path.join(rel_dir, file) if rel_dir != "." else file
                 file_tree_lines.append(rel_file)
                 # Find README.md (case-insensitive)
                 if file.lower() == "readme.md" and not readme_content:
                     try:
-                        with open(os.path.join(root, file), "r", encoding="utf-8") as f:
+                        with open(file_path, "r", encoding="utf-8") as f:
                             readme_content = f.read()
                     except Exception as e:
                         logger.warning(f"Could not read README.md: {str(e)}")

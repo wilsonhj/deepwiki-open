@@ -17,6 +17,7 @@ from api.clients import (
     OpenRouterClient,
 )
 from api.logger import get_logger
+from api.repository import path_within
 
 if TYPE_CHECKING:
     from adalflow import Embedder
@@ -505,7 +506,12 @@ def iterate_files(
 
     results: list[str] = []
     for p in Path(root_dir).rglob("*"):
-        if not p.is_file():
+        # Never follow symlinks: a cloned repo can ship `env.md ->
+        # /proc/self/environ` (or a link into a directory outside the clone),
+        # and every file listed here is read and embedded by the indexer.
+        if p.is_symlink() or not p.is_file():
+            continue
+        if not path_within(str(p), root_dir):
             continue
         if extensions and p.suffix.lower() not in extensions:
             continue

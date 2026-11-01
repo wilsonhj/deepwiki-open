@@ -102,3 +102,66 @@ def test_clone_dirs_are_host_specific():
     assert genuine != impostor
     assert path_within(genuine, CLONE_REPO_ROOT)
     assert path_within(impostor, CLONE_REPO_ROOT)
+
+
+def _symlinked_repo(tmp_path):
+    """A repo whose files include symlinks pointing outside of it."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("HOST SECRET")
+    (outside / "dir").mkdir()
+    (outside / "dir" / "inner.md").write_text("HOST SECRET")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("real readme")
+    (repo / "main.py").write_text("print('hi')")
+    (repo / "env.md").symlink_to(outside / "secret.md")
+    (repo / "linked").symlink_to(outside / "dir", target_is_directory=True)
+    # Even a link to a file inside the repo is skipped: links are never needed
+    # to index a repo and following them is how host files get pulled in.
+    (repo / "alias.py").symlink_to(repo / "main.py")
+    return repo
+
+
+def test_iterate_files_skips_symlinks_out_of_the_repo(tmp_path, exclude_test_config):
+    from api.config import iterate_files
+
+    repo = _symlinked_repo(tmp_path)
+    files = iterate_files(str(repo))
+    assert sorted(files) == ["README.md", "main.py"]
+
+
+def test_read_repo_file_tree_does_not_read_a_symlinked_readme(
+    tmp_path, exclude_test_config
+):
+    from api.services.wiki.structure import read_repo_file_tree
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("HOST SECRET")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").symlink_to(outside / "secret.md")
+    (repo / "main.py").write_text("x = 1")
+
+    files, readme = read_repo_file_tree(str(repo))
+    assert files == ["main.py"]
+    assert "HOST SECRET" not in readme
+
+
+def test_local_repo_structure_skips_symlinks(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+
+    repo = _symlinked_repo(tmp_path)
+    (repo / "README.md").unlink()
+    (repo / "README.md").symlink_to(tmp_path / "outside" / "secret.md")
+    monkeypatch.setenv("DEEPWIKI_LOCAL_REPO_ROOTS", str(repo))
+
+    resp = TestClient(app).get("/local_repo/structure", params={"path": str(repo)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "HOST SECRET" not in resp.text
+    assert body["file_tree"].split("\n") == ["main.py"]
